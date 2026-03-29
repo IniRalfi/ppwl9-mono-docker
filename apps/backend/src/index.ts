@@ -1,4 +1,4 @@
-import { Elysia, type Context } from "elysia";
+import { Elysia, type Context, type PreContext } from "elysia";
 import { cors } from "@elysiajs/cors";
 import { swagger } from "@elysiajs/swagger";
 import { cookie } from "@elysiajs/cookie";
@@ -14,6 +14,10 @@ const tokenStore = new Map<string, { access_token: string; refresh_token?: strin
 type SessionCookie = {
   value: string;
   maxAge?: number;
+  path?: string;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: "strict" | "lax" | "none";
   remove: () => void;
 };
 
@@ -22,7 +26,13 @@ type CookieContext = {
 };
 
 const app = new Elysia()
-  .use(cors({ origin: ["http://localhost:5173", "http://localhost:5174"], credentials: true }))
+  .use(
+    cors({
+      origin: process.env.FRONTEND_URL || "http://localhost:5173",
+      credentials: true, // WAJIB untuk /auth/me yang mengecek session/cookie
+      allowedHeaders: ["Content-Type", "Authorization"],
+    }),
+  )
   .use(swagger())
   .use(cookie())
 
@@ -52,6 +62,28 @@ const app = new Elysia()
     const oauth2Client = createOAuthClient();
     const url = getAuthUrl(oauth2Client);
     return redirect(url);
+  })
+
+  .onRequest(({ request, set }: PreContext) => {
+    const url = new URL(request.url);
+
+    if (url.pathname.startsWith("/users")) {
+      const origin = request.headers.get("origin");
+      const frontendUrl = process.env.FRONTEND_URL ?? "http://localhost:5173";
+      const key = url.searchParams.get("key");
+
+      // 1. Izinkan jika datang dari Frontend resmi (AJAX/Fetch)
+      if (origin === frontendUrl) {
+        return;
+      }
+
+      // 2. Jika tidak dari Frontend, WAJIB cek API_KEY
+      // Ini akan menangkap akses langsung browser, Postman, cURL, dll.
+      if (key !== process.env.API_KEY) {
+        set.status = 401;
+        return { message: "Unauthorized: Access denied without valid API Key" };
+      }
+    }
   })
 
   // Google callback setelah login
@@ -85,12 +117,20 @@ const app = new Elysia()
         refresh_token: tokens.refresh_token ?? undefined,
       });
 
+      if (!session) return;
+
       // Set cookie session
       session.value = sessionId;
       session.maxAge = 60 * 60 * 24; // 1 hari
+      session.path = "/";
+
+      // !!! Tambahkan KONFIGURASI PRODUCTION
+      session.httpOnly = true;
+      session.secure = true; // WAJIB: Cookie hanya dikirim lewat HTTPS
+      session.sameSite = "none"; // WAJIB: Agar cookie bisa dikirim antar domain berbeda
 
       // Redirect ke frontend
-      return redirect("http://localhost:5173/classroom");
+      return redirect(`${process.env.FRONTEND_URL}/classroom`);
     },
   )
 
@@ -169,11 +209,14 @@ const app = new Elysia()
 
       return { data: result, message: "Course submissions retrieved" };
     },
-  )
+  );
 
-  .listen(3000);
+if (process.env.NODE_ENV != "production") {
+  app.listen(3000);
+  console.log(`🦊 Backend → http://localhost:3000`);
+  console.log(`🦊 FRONTEND_URL → ${process.env.FRONTEND_URL}`); // pembeda .env.development & .env.production
+  console.log(`🦊 DATABASE_URL: ${process.env.DATABASE_URL}`); // pembeda development & production
+  console.log(`🦊 GOOGLE_REDIRECT_URI: ${process.env.GOOGLE_REDIRECT_URI}`); // dari file .env
+}
 
-console.log(`🦊 Backend → http://localhost:${app.server?.port}`);
-console.log(`📖 Swagger → http://localhost:${app.server?.port}/swagger`);
-
-export type App = typeof app;
+export default app;
